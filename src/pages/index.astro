@@ -1,0 +1,34 @@
+---
+import "../styles/global.css";
+import WorkflowExplorer from "../components/WorkflowExplorer";
+
+export const prerender = false;
+---
+
+<html lang="en" class="h-full">
+	<head>
+		<meta charset="utf-8" />
+		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+		<meta name="viewport" content="width=device-width" />
+		<meta name="generator" content={Astro.generator} />
+		<title>Cloudflare Workflows Explorer</title>
+	</head>
+	<body class="min-h-full bg-slate-950 text-slate-100 antialiased">
+		<main class="mx-auto max-w-6xl px-6 py-10">
+			<header class="mb-8">
+				<h1 class="text-3xl font-bold tracking-tight">
+					Cloudflare Workflows Explorer
+				</h1>
+				<p class="mt-2 max-w-2xl text-slate-400">
+					An interactive demo of <code class="text-slate-200">step.do</code>,
+					<code class="text-slate-200">step.waitForEvent</code>,
+					<code class="text-slate-200">step.sleep</code>, and step-level retry.
+					Start a workflow, watch it pause for an event, sleep, and recover from
+					a deliberate failure.
+				</p>
+			</header>
+
+			<WorkflowExplorer client:load />
+		</main>
+	</body>
+</html>

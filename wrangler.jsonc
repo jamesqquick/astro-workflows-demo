@@ -1,0 +1,21 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "workflows-explorer",
+	"main": "./src/worker.ts",
+	"compatibility_date": "2026-05-05",
+	"compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+	"assets": {
+		"directory": "./dist",
+		"binding": "ASSETS"
+	},
+	"observability": {
+		"enabled": true
+	},
+	"workflows": [
+		{
+			"name": "demo-workflow",
+			"binding": "MY_WORKFLOW",
+			"class_name": "DemoWorkflow"
+		}
+	]
+}
