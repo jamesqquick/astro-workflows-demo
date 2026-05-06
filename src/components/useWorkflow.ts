@@ -19,6 +19,11 @@ export const STEPS = [
 		label: "Unreliable step",
 		description: "step.do (retries 3x)",
 	},
+	{
+		key: "wait-for-custom-event",
+		label: "Wait for custom event",
+		description: "step.waitForEvent",
+	},
 	{ key: "finalize", label: "Finalize", description: "step.do" },
 ] as const;
 
@@ -49,6 +54,7 @@ export type ProceedGate =
 	| "wait-for-approval"
 	| "sleep-step"
 	| "unreliable-step"
+	| "wait-for-custom-event"
 	| "finalize";
 
 export type ProgressDoc = {
@@ -89,7 +95,11 @@ export type ResolvedStep = {
 	error?: string;
 };
 
-const POLL_INTERVAL_MS = 1000;
+/** Lightweight poll just for workflow runtime status (running / waiting /
+ *  complete / errored). Progress updates flow through the WebSocket and are
+ *  effectively instant. */
+const STATUS_POLL_INTERVAL_MS = 2000;
+const WS_RECONNECT_BACKOFF_MS = [500, 1500, 4000];
 
 function timeNow() {
 	return new Date().toLocaleTimeString();
@@ -137,8 +147,12 @@ export function resolveStepState(
 			let state: ResolvedStepState;
 			if (latest.state === "active") {
 				if (stepKey === "sleep-step") state = "sleeping";
-				else if (stepKey === "wait-for-approval") state = "waiting";
-				else state = "active";
+				else if (
+					stepKey === "wait-for-approval" ||
+					stepKey === "wait-for-custom-event"
+				) {
+					state = "waiting";
+				} else state = "active";
 			} else {
 				state = latest.state;
 			}
@@ -199,37 +213,139 @@ export function useWorkflow(storageKey: string) {
 		if (!instanceId) return;
 
 		let cancelled = false;
+		previousStatusRef.current = null;
+		seenEntriesRef.current = new Set();
 
-		const poll = async () => {
+		// ----- Per-entry log emitter (called for every progress update) ------
+		const emitNewLogEntries = (progress: ProgressDoc) => {
+			for (const entry of progress.steps) {
+				const sig = entrySignature(entry);
+				if (seenEntriesRef.current.has(sig)) continue;
+				seenEntriesRef.current.add(sig);
+
+				const stepLabel =
+					STEPS.find((s) => s.key === entry.key)?.label ?? entry.key;
+				const attemptSuffix = entry.attempt
+					? ` (attempt ${entry.attempt}${entry.maxAttempts ? `/${entry.maxAttempts}` : ""})`
+					: "";
+
+				switch (entry.state) {
+					case "active":
+						appendLog(`▶ ${stepLabel} started${attemptSuffix}`, "info");
+						break;
+					case "completed":
+						appendLog(
+							`✓ ${stepLabel} completed${attemptSuffix}`,
+							"success",
+						);
+						break;
+					case "retrying":
+						appendLog(
+							`✗ ${stepLabel} failed${attemptSuffix} — ${entry.error ?? "no error"}`,
+							"warning",
+						);
+						appendLog(`↻ retry initiated for ${stepLabel}`, "warning");
+						break;
+					case "failed":
+						appendLog(
+							`✗ ${stepLabel} failed permanently — ${entry.error ?? "no error"}`,
+							"error",
+						);
+						break;
+				}
+			}
+		};
+
+		// ----- WebSocket subscription for real-time progress -----------------
+		let ws: WebSocket | null = null;
+		let reconnectAttempt = 0;
+		let reconnectTimer: number | undefined;
+
+		const connectWs = () => {
+			if (cancelled) return;
+
+			const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+			const url = `${proto}//${window.location.host}/api/workflow/ws?id=${encodeURIComponent(instanceId)}`;
+			ws = new WebSocket(url);
+
+			ws.onopen = () => {
+				reconnectAttempt = 0;
+			};
+
+			ws.onmessage = (ev) => {
+				if (cancelled) return;
+				try {
+					const msg = JSON.parse(ev.data) as
+						| { type: "hello"; progress: ProgressDoc }
+						| { type: "progress"; progress: ProgressDoc };
+					if (msg.type === "hello" || msg.type === "progress") {
+						setStatus((prev) => ({
+							instanceId,
+							status: prev?.status ?? "unknown",
+							error: prev?.error,
+							output: prev?.output,
+							progress: msg.progress,
+						}));
+						emitNewLogEntries(msg.progress);
+					}
+				} catch {
+					// ignore malformed payloads
+				}
+			};
+
+			ws.onclose = () => {
+				if (cancelled) return;
+				ws = null;
+				if (reconnectAttempt < WS_RECONNECT_BACKOFF_MS.length) {
+					const delay = WS_RECONNECT_BACKOFF_MS[reconnectAttempt];
+					reconnectAttempt++;
+					reconnectTimer = window.setTimeout(connectWs, delay);
+				} else {
+					appendLog(
+						"Live updates disconnected. Refresh to reconnect.",
+						"error",
+					);
+				}
+			};
+
+			ws.onerror = () => {
+				// onclose will fire too; let it handle reconnection.
+			};
+		};
+
+		connectWs();
+
+		// ----- Lightweight status poll (workflow runtime status only) --------
+		// The DO doesn't track Workflows' own status field (running / waiting /
+		// complete / errored); we still need a low-frequency poll for that.
+		let pollTimer: number | undefined;
+
+		const pollStatus = async () => {
 			try {
 				const res = await fetch(
 					`/api/workflow/status?id=${encodeURIComponent(instanceId)}`,
 				);
 				if (!res.ok) {
-					const body = await res.json().catch(() => ({}));
-					if (!cancelled) {
-						appendLog(
-							`Status fetch failed: ${(body as { error?: string }).error ?? res.status}`,
-							"error",
-						);
-						// 404 = instance doesn't exist (stale localStorage). Clear it so
-						// the user can start fresh.
-						if (res.status === 404) {
-							setInstanceId(null);
-							setStatus(null);
-						}
+					if (res.status === 404 && !cancelled) {
+						setInstanceId(null);
+						setStatus(null);
 					}
 					return;
 				}
 				const next = (await res.json()) as StatusResponse;
 				if (cancelled) return;
-				setStatus(next);
+				setStatus((prev) => ({
+					...next,
+					// Prefer the progress we already have from the WebSocket,
+					// which is more current than what the API sees.
+					progress: prev?.progress ?? next.progress,
+				}));
 
-				const prev = previousStatusRef.current;
-				if (prev !== next.status) {
-					if (prev !== null) {
+				const prevStatus = previousStatusRef.current;
+				if (prevStatus !== next.status) {
+					if (prevStatus !== null) {
 						appendLog(
-							`Workflow status: ${prev} → ${next.status}`,
+							`Workflow status: ${prevStatus} → ${next.status}`,
 							next.status === "errored"
 								? "error"
 								: next.status === "complete"
@@ -241,74 +357,32 @@ export function useWorkflow(storageKey: string) {
 					}
 					previousStatusRef.current = next.status;
 				}
-
-				if (next.progress?.steps) {
-					for (const entry of next.progress.steps) {
-						const sig = entrySignature(entry);
-						if (seenEntriesRef.current.has(sig)) continue;
-						seenEntriesRef.current.add(sig);
-
-						const stepLabel =
-							STEPS.find((s) => s.key === entry.key)?.label ?? entry.key;
-						const attemptSuffix = entry.attempt
-							? ` (attempt ${entry.attempt}${entry.maxAttempts ? `/${entry.maxAttempts}` : ""})`
-							: "";
-
-						switch (entry.state) {
-							case "active":
-								appendLog(`▶ ${stepLabel} started${attemptSuffix}`, "info");
-								break;
-							case "completed":
-								appendLog(`✓ ${stepLabel} completed${attemptSuffix}`, "success");
-								break;
-							case "retrying":
-								appendLog(
-									`✗ ${stepLabel} failed${attemptSuffix} — ${entry.error ?? "no error"}`,
-									"warning",
-								);
-								appendLog(`↻ retry initiated for ${stepLabel}`, "warning");
-								break;
-							case "failed":
-								appendLog(
-									`✗ ${stepLabel} failed permanently — ${entry.error ?? "no error"}`,
-									"error",
-								);
-								break;
-						}
-					}
-				}
-			} catch (err) {
-				if (!cancelled) {
-					appendLog(
-						`Network error while polling: ${(err as Error).message}`,
-						"error",
-					);
-				}
+			} catch {
+				// transient network errors — next tick will retry
 			}
 		};
 
-		previousStatusRef.current = null;
-		seenEntriesRef.current = new Set();
-
-		// Self-rescheduling polling: each tick only starts AFTER the previous
-		// fetch completes. Using setInterval here would allow overlapping
-		// fetches to resolve out of order and overwrite fresh data with stale
-		// data — visible as a UI flicker (e.g. the approval modal briefly
-		// reappearing after the user clicks YES).
-		let timeoutId: number | undefined;
-		const scheduleNext = () => {
+		const scheduleStatusPoll = () => {
 			if (cancelled) return;
-			timeoutId = window.setTimeout(async () => {
-				if (cancelled) return;
-				await poll();
-				scheduleNext();
-			}, POLL_INTERVAL_MS);
+			pollTimer = window.setTimeout(async () => {
+				await pollStatus();
+				scheduleStatusPoll();
+			}, STATUS_POLL_INTERVAL_MS);
 		};
-		void poll().then(scheduleNext);
+
+		void pollStatus().then(scheduleStatusPoll);
 
 		return () => {
 			cancelled = true;
-			if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+			if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer);
+			if (pollTimer !== undefined) window.clearTimeout(pollTimer);
+			if (ws) {
+				try {
+					ws.close();
+				} catch {
+					// ignore
+				}
+			}
 		};
 	}, [instanceId, appendLog]);
 
@@ -344,7 +418,7 @@ export function useWorkflow(storageKey: string) {
 	};
 
 	const sendWorkflowEvent = async (
-		type: "user-decision" | "user-proceed",
+		type: "user-decision" | "user-proceed" | "user-custom-event",
 		payload: Record<string, unknown>,
 		successLog: string,
 	) => {
@@ -390,6 +464,13 @@ export function useWorkflow(storageKey: string) {
 			`Proceeded past ${gate}`,
 		);
 
+	const sendCustomEvent = () =>
+		sendWorkflowEvent(
+			"user-custom-event",
+			{ sentAt: new Date().toISOString() },
+			"Custom event sent",
+		);
+
 	const isTerminal =
 		status?.status === "complete" ||
 		status?.status === "errored" ||
@@ -398,11 +479,16 @@ export function useWorkflow(storageKey: string) {
 
 	// Trust the progress data, not the runtime status field — the local
 	// Workflows emulator reports "running" during step.waitForEvent hibernation
-	// even though the workflow is genuinely paused. The KV-backed progress doc
-	// is the source of truth.
+	// even though the workflow is genuinely paused. Progress data is the
+	// source of truth.
 	const isWaitingForApproval =
 		status?.progress?.steps?.some(
 			(s) => s.key === "wait-for-approval" && s.state === "active",
+		) ?? false;
+
+	const isWaitingForCustomEvent =
+		status?.progress?.steps?.some(
+			(s) => s.key === "wait-for-custom-event" && s.state === "active",
 		) ?? false;
 
 	// Tutorial gate: which `proceed:*` step.waitForEvent is the workflow
@@ -418,11 +504,13 @@ export function useWorkflow(storageKey: string) {
 		busy,
 		isTerminal,
 		isWaitingForApproval,
+		isWaitingForCustomEvent,
 		currentStep,
 		currentProceedGate,
 		startWorkflow,
 		approve,
 		reject,
 		proceed,
+		sendCustomEvent,
 	};
 }

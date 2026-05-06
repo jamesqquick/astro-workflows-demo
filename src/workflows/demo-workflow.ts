@@ -3,14 +3,7 @@ import {
 	type WorkflowEvent,
 	type WorkflowStep,
 } from "cloudflare:workers";
-import {
-	appendStep,
-	readProgress,
-	setProceedGate,
-	writeProgress,
-	type ProceedGate,
-	type StepKey,
-} from "./progress";
+import type { ProceedGate, StepKey } from "./progress";
 
 export type DemoWorkflowParams = {
 	startedAt?: string;
@@ -18,6 +11,7 @@ export type DemoWorkflowParams = {
 
 type DecisionEvent = { decision: "approve" | "reject" };
 type ProceedEvent = { for: ProceedGate };
+type CustomEvent = { sentAt: string };
 
 const UNRELIABLE_MAX_ATTEMPTS = 3;
 const PROCEED_TIMEOUT = "1 hour";
@@ -27,35 +21,23 @@ const PROCEED_TIMEOUT = "1 hour";
  *
  * Every substantive step is preceded by a tutorial gate (`step.waitForEvent`
  * with type "user-proceed") so the UI can show an educational modal before
- * each primitive runs. The user clicks PROCEED and the corresponding step
- * executes. The approval step itself is a separate gate that uses
- * "user-decision" events.
+ * each primitive runs.
  *
- * Per-step progress is mirrored to KV so the UI can surface "currently on
- * step N" and "currently waiting on tutorial gate G".
+ * Per-step progress is mirrored to a per-instance ProgressRoom Durable
+ * Object, which writes to its own SQLite-backed storage AND broadcasts every
+ * change to all subscribed WebSocket clients. The browser sees state changes
+ * in real time without polling.
  */
 export class DemoWorkflow extends WorkflowEntrypoint<Env, DemoWorkflowParams> {
 	async run(event: WorkflowEvent<DemoWorkflowParams>, step: WorkflowStep) {
 		const instanceId = event.instanceId;
-		const kv = this.env.JQQ_WORKFLOWS_DEMO_KV;
+		const room = this.env.PROGRESS_ROOM.getByName(instanceId);
 
 		const recordActive = (key: StepKey, attempt?: number) =>
 			step.do(
 				`progress:${key}:active${attempt ? `:${attempt}` : ""}`,
 				async () => {
-					const prev = await readProgress(kv, instanceId);
-					await writeProgress(
-						kv,
-						instanceId,
-						appendStep(prev, {
-							key,
-							state: "active",
-							attempt,
-							maxAttempts:
-								key === "unreliable-step" ? UNRELIABLE_MAX_ATTEMPTS : undefined,
-							at: new Date().toISOString(),
-						}),
-					);
+					await room.recordActive(key, attempt);
 				},
 			);
 
@@ -63,47 +45,20 @@ export class DemoWorkflow extends WorkflowEntrypoint<Env, DemoWorkflowParams> {
 			step.do(
 				`progress:${key}:complete${attempt ? `:${attempt}` : ""}`,
 				async () => {
-					const prev = await readProgress(kv, instanceId);
-					await writeProgress(
-						kv,
-						instanceId,
-						appendStep(prev, {
-							key,
-							state: "completed",
-							attempt,
-							maxAttempts:
-								key === "unreliable-step" ? UNRELIABLE_MAX_ATTEMPTS : undefined,
-							at: new Date().toISOString(),
-						}),
-					);
+					await room.recordComplete(key, attempt);
 				},
 			);
 
 		const recordRetrying = (key: StepKey, attempt: number, error: string) =>
 			step.do(`progress:${key}:retry:${attempt}`, async () => {
-				const prev = await readProgress(kv, instanceId);
-				await writeProgress(
-					kv,
-					instanceId,
-					appendStep(prev, {
-						key,
-						state: "retrying",
-						attempt,
-						maxAttempts:
-							key === "unreliable-step" ? UNRELIABLE_MAX_ATTEMPTS : undefined,
-						error,
-						at: new Date().toISOString(),
-					}),
-				);
+				await room.recordRetrying(key, attempt, error);
 			});
 
 		const setGate = (gate: ProceedGate | null) =>
 			step.do(`progress:gate:${gate ?? "clear"}`, async () => {
-				const prev = await readProgress(kv, instanceId);
-				await writeProgress(kv, instanceId, setProceedGate(prev, gate));
+				await room.setGate(gate);
 			});
 
-		// Tutorial gate before each substantive step.
 		const awaitProceed = async (gate: ProceedGate) => {
 			await setGate(gate);
 			await step.waitForEvent<ProceedEvent>(`proceed:${gate}`, {
@@ -198,7 +153,20 @@ export class DemoWorkflow extends WorkflowEntrypoint<Env, DemoWorkflowParams> {
 
 		await step.sleep("post-retry-pause", "1 second");
 
-		// ---- Tutorial gate → Step 6: finalize ---------------------------------
+		// ---- Tutorial gate → Step 6: wait-for-custom-event --------------------
+		// Showcases step.waitForEvent in a non-decision context: the workflow
+		// just waits for ANY external signal to fire, then continues.
+		await awaitProceed("wait-for-custom-event");
+		await recordActive("wait-for-custom-event");
+		const customEvent = await step.waitForEvent<CustomEvent>(
+			"wait-for-custom-event",
+			{ type: "user-custom-event", timeout: "5 minutes" },
+		);
+		await recordComplete("wait-for-custom-event");
+
+		await step.sleep("post-custom-event-pause", "1 second");
+
+		// ---- Tutorial gate → Step 7: finalize ---------------------------------
 		await awaitProceed("finalize");
 		await recordActive("finalize");
 		const summary = await step.do("finalize", async () => {
@@ -206,6 +174,7 @@ export class DemoWorkflow extends WorkflowEntrypoint<Env, DemoWorkflowParams> {
 				init,
 				humanDecision: approvalResult.decision,
 				retryRecovered: recovered.succeededOnAttempt,
+				customEventReceivedAt: customEvent.payload.sentAt,
 				finishedAt: new Date().toISOString(),
 			};
 		});

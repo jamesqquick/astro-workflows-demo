@@ -22,10 +22,18 @@
 			"class_name": "DemoWorkflow"
 		}
 	],
-	"kv_namespaces": [
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "PROGRESS_ROOM",
+				"class_name": "ProgressRoom"
+			}
+		]
+	},
+	"migrations": [
 		{
-			"binding": "JQQ_WORKFLOWS_DEMO_KV",
-			"id": "0d25c57e6a5441eebb9c6257a3139184"
+			"tag": "v1",
+			"new_sqlite_classes": ["ProgressRoom"]
 		}
 	]
 }

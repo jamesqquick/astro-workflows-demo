@@ -88,6 +88,26 @@ export const STEP_LESSONS: Record<ProceedGate, StepLesson> = {
 			"developers.cloudflare.com/workflows/build/sleeping-and-retrying",
 	},
 
+	"wait-for-custom-event": {
+		primitive: "step.waitForEvent",
+		primitiveColor: "bg-[#F0DC5B] text-black",
+		headline: "Wait for any external signal",
+		body: "step.waitForEvent isn't only for binary approve/reject decisions. The workflow can pause indefinitely until ANY matching event arrives — a webhook from Stripe, a Kafka message, a button click, a cron trigger. The workflow uses no compute while it waits.",
+		snippet: `const customEvent = await step.waitForEvent("wait-for-custom-event", {
+  type: "user-custom-event",
+  timeout: "5 minutes",
+});
+
+// elsewhere, fire the event:
+// await instance.sendEvent({
+//   type: "user-custom-event",
+//   payload: { sentAt: new Date().toISOString() },
+// });`,
+		docUrl: "https://developers.cloudflare.com/workflows/build/events-and-parameters/",
+		docLabel:
+			"developers.cloudflare.com/workflows/build/events-and-parameters",
+	},
+
 	finalize: {
 		primitive: "step.do",
 		primitiveColor: "bg-[#00FF66] text-black",

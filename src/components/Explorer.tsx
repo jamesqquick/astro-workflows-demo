@@ -25,6 +25,8 @@ export default function Explorer() {
 	const [tutorialDismissed, setTutorialDismissed] = useState(false);
 	const [approvalDismissed, setApprovalDismissed] = useState(false);
 	const [approvalReady, setApprovalReady] = useState(false);
+	const [sendEventDismissed, setSendEventDismissed] = useState(false);
+	const [sendEventReady, setSendEventReady] = useState(false);
 
 	// Reset dismissal whenever the relevant gate changes — so a future Restart
 	// shows the modal again.
@@ -36,8 +38,12 @@ export default function Explorer() {
 		if (!w.isWaitingForApproval) setApprovalDismissed(false);
 	}, [w.isWaitingForApproval]);
 
+	useEffect(() => {
+		if (!w.isWaitingForCustomEvent) setSendEventDismissed(false);
+	}, [w.isWaitingForCustomEvent]);
+
 	// Delay the YES/NO approval modal slightly after the tutorial gate clears,
-	// so the user sees the yellow WAITING badge on step 2 before the dialog
+	// so the user sees the yellow WAITING badge on the step before the dialog
 	// steals focus.
 	useEffect(() => {
 		if (!w.isWaitingForApproval) {
@@ -48,6 +54,18 @@ export default function Explorer() {
 		return () => window.clearTimeout(t);
 	}, [w.isWaitingForApproval]);
 
+	useEffect(() => {
+		if (!w.isWaitingForCustomEvent) {
+			setSendEventReady(false);
+			return;
+		}
+		const t = window.setTimeout(
+			() => setSendEventReady(true),
+			APPROVAL_DELAY_MS,
+		);
+		return () => window.clearTimeout(t);
+	}, [w.isWaitingForCustomEvent]);
+
 	// The tutorial modal for "wait-for-approval" rolls directly into the
 	// YES/NO approval modal, so we don't show two consecutive modals there —
 	// the approval gate handles its own messaging.
@@ -55,6 +73,8 @@ export default function Explorer() {
 		w.currentProceedGate !== null && !tutorialDismissed;
 	const showApproval =
 		w.isWaitingForApproval && approvalReady && !approvalDismissed;
+	const showSendEvent =
+		w.isWaitingForCustomEvent && sendEventReady && !sendEventDismissed;
 
 	return (
 		<div className="min-h-screen bg-[#F0DC5B] font-mono text-black">
@@ -228,6 +248,15 @@ export default function Explorer() {
 				/>
 			)}
 
+			{/* Send-event modal — appears while wait-for-custom-event is paused */}
+			{showSendEvent && (
+				<SendEventModal
+					busy={w.busy}
+					onSend={w.sendCustomEvent}
+					onDismiss={() => setSendEventDismissed(true)}
+				/>
+			)}
+
 			{/* Reopen affordances when the user dismissed a modal but the gate
 			    is still active. */}
 			{w.currentProceedGate && tutorialDismissed && (
@@ -246,6 +275,15 @@ export default function Explorer() {
 					className="fixed bottom-6 right-6 z-40 cursor-pointer border-4 border-black bg-[#00FF66] px-5 py-3 text-sm font-black uppercase tracking-widest text-black shadow-[8px_8px_0_0_#000] hover:bg-black hover:text-[#00FF66]"
 				>
 					⚠ Approval pending — reopen
+				</button>
+			)}
+			{w.isWaitingForCustomEvent && sendEventDismissed && (
+				<button
+					type="button"
+					onClick={() => setSendEventDismissed(false)}
+					className="fixed bottom-6 right-6 z-40 cursor-pointer border-4 border-black bg-[#F0DC5B] px-5 py-3 text-sm font-black uppercase tracking-widest text-black shadow-[8px_8px_0_0_#000] hover:bg-black hover:text-[#F0DC5B]"
+				>
+					⚠ Event pending — reopen
 				</button>
 			)}
 		</div>
@@ -523,6 +561,118 @@ function ApprovalModal(props: {
 				</div>
 				<p className="mt-4 font-mono text-[11px] uppercase tracking-wider text-black/60">
 					Keyboard: [Y] approve · [N] reject · [ESC] close
+				</p>
+			</div>
+		</ModalFrame>
+	);
+}
+
+// ---------- Send Event Modal ------------------------------------------------
+
+function SendEventModal(props: {
+	busy: boolean;
+	onSend: () => Promise<void>;
+	onDismiss: () => void;
+}) {
+	const sendRef = useRef<HTMLButtonElement>(null);
+	const [submitting, setSubmitting] = useState(false);
+	const [errorMsg, setErrorMsg] = useState<string | null>(null);
+	const submittingRef = useRef(false);
+	const handleRef = useRef<() => Promise<void>>(async () => {});
+
+	const handle = async () => {
+		if (submittingRef.current) return;
+		submittingRef.current = true;
+		setSubmitting(true);
+		setErrorMsg(null);
+		try {
+			await props.onSend();
+		} catch (err) {
+			setErrorMsg((err as Error).message);
+		} finally {
+			submittingRef.current = false;
+			setSubmitting(false);
+		}
+	};
+
+	handleRef.current = handle;
+
+	useEffect(() => {
+		sendRef.current?.focus();
+	}, []);
+
+	useEffect(() => {
+		const onKey = (e: KeyboardEvent) => {
+			if (e.key === "Enter") {
+				e.preventDefault();
+				void handleRef.current();
+			}
+		};
+		window.addEventListener("keydown", onKey);
+		return () => window.removeEventListener("keydown", onKey);
+	}, []);
+
+	const disabled = props.busy || submitting;
+	const stepIndex =
+		STEPS.findIndex((s) => s.key === "wait-for-custom-event") + 1;
+
+	return (
+		<ModalFrame
+			stepIndex={stepIndex}
+			totalSteps={STEPS.length}
+			headerLabel="EVENT"
+			onDismiss={props.onDismiss}
+		>
+			<div className="p-8">
+				<span className="inline-block border-2 border-black bg-[#F0DC5B] px-2 py-0.5 font-mono text-[11px] font-black uppercase tracking-wider text-black">
+					step.waitForEvent
+				</span>
+				<h2 className="mt-4 text-4xl font-black uppercase leading-none tracking-tighter md:text-5xl">
+					Waiting
+					<br />
+					for an
+					<br />
+					event.
+				</h2>
+				<p className="mt-6 max-w-md border-l-4 border-black pl-3 text-sm">
+					The workflow is paused on a step.waitForEvent. It will resume the
+					moment a matching event arrives. Click below to fire one.
+				</p>
+
+				<div className="mt-6 border-4 border-black bg-black p-4">
+					<p className="mb-2 text-[10px] font-black uppercase tracking-widest text-[#F0DC5B]">
+						// what this button does
+					</p>
+					<pre className="overflow-x-auto font-mono text-xs leading-relaxed text-[#F0DC5B]">
+						{`await instance.sendEvent({
+  type: "user-custom-event",
+  payload: { sentAt: new Date().toISOString() },
+});`}
+					</pre>
+				</div>
+
+				{errorMsg && (
+					<p className="mt-4 border-2 border-black bg-[#FF0000] px-3 py-2 font-mono text-xs text-white">
+						! {errorMsg}
+					</p>
+				)}
+				{submitting && !errorMsg && (
+					<p className="mt-4 border-2 border-black bg-[#F0DC5B] px-3 py-2 font-mono text-xs">
+						Sending...
+					</p>
+				)}
+
+				<button
+					ref={sendRef}
+					type="button"
+					onClick={handle}
+					disabled={disabled}
+					className="mt-6 w-full cursor-pointer border-4 border-black bg-[#0000FF] px-6 py-5 text-2xl font-black uppercase text-white hover:bg-black hover:text-[#0000FF] disabled:cursor-not-allowed disabled:opacity-50"
+				>
+					SEND EVENT →
+				</button>
+				<p className="mt-3 font-mono text-[11px] uppercase tracking-wider text-black/60">
+					Keyboard: [ENTER] send · [ESC] dismiss
 				</p>
 			</div>
 		</ModalFrame>

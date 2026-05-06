@@ -1,7 +1,6 @@
 /**
- * Shared progress shape written to KV during workflow execution and read
- * by the status API. The Workflows runtime only exposes one overall status
- * value per instance, so we track per-step progress ourselves.
+ * Shared types and pure mutator helpers for workflow progress tracking.
+ * Storage and broadcasting now live in the ProgressRoom Durable Object.
  */
 
 export type StepKey =
@@ -10,6 +9,7 @@ export type StepKey =
 	| "process-approval"
 	| "sleep-step"
 	| "unreliable-step"
+	| "wait-for-custom-event"
 	| "finalize";
 
 /**
@@ -21,6 +21,7 @@ export type ProceedGate =
 	| "wait-for-approval"
 	| "sleep-step"
 	| "unreliable-step"
+	| "wait-for-custom-event"
 	| "finalize";
 
 export type StepEntry = {
@@ -40,37 +41,19 @@ export type ProgressDoc = {
 	updatedAt: string;
 };
 
-export const progressKey = (instanceId: string) =>
-	`progress:${instanceId}`;
-
-export async function readProgress(
-	kv: KVNamespace,
-	instanceId: string,
-): Promise<ProgressDoc | null> {
-	return kv.get<ProgressDoc>(progressKey(instanceId), "json");
-}
-
-export async function writeProgress(
-	kv: KVNamespace,
-	instanceId: string,
-	doc: ProgressDoc,
-): Promise<void> {
-	await kv.put(progressKey(instanceId), JSON.stringify(doc), {
-		expirationTtl: 60 * 60 * 24, // 24h
-	});
-}
+export const EMPTY_PROGRESS: ProgressDoc = {
+	currentStep: null,
+	currentProceedGate: null,
+	steps: [],
+	updatedAt: new Date(0).toISOString(),
+};
 
 export function appendStep(
 	doc: ProgressDoc | null,
 	entry: StepEntry,
 ): ProgressDoc {
 	const now = new Date().toISOString();
-	const base: ProgressDoc = doc ?? {
-		currentStep: null,
-		currentProceedGate: null,
-		steps: [],
-		updatedAt: now,
-	};
+	const base: ProgressDoc = doc ?? { ...EMPTY_PROGRESS, updatedAt: now };
 
 	const existingIdx = base.steps.findIndex(
 		(s) =>
@@ -98,12 +81,7 @@ export function setProceedGate(
 	gate: ProceedGate | null,
 ): ProgressDoc {
 	const now = new Date().toISOString();
-	const base: ProgressDoc = doc ?? {
-		currentStep: null,
-		currentProceedGate: null,
-		steps: [],
-		updatedAt: now,
-	};
+	const base: ProgressDoc = doc ?? { ...EMPTY_PROGRESS, updatedAt: now };
 	return {
 		...base,
 		currentProceedGate: gate,

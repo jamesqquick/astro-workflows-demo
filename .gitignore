@@ -8,6 +8,9 @@ worker-configuration.d.ts
 # scratch / one-off scripts (per repo policy)
 tmp/
 
+# git worktrees (kept inside repo per project convention)
+.worktrees/
+
 # dependencies
 node_modules/
 
