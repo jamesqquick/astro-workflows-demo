@@ -7,9 +7,9 @@
   },
   "scripts": {
     "dev": "astro dev",
-    "build": "astro build",
-    "preview": "astro build && wrangler dev --x-remote-bindings",
-    "deploy": "astro build && wrangler deploy",
+    "build": "astro build && node scripts/dedupe-wrangler-bindings.mjs",
+    "preview": "pnpm build && wrangler dev",
+    "deploy": "pnpm build && wrangler deploy",
     "astro": "astro",
     "cf-typegen": "wrangler types"
   },

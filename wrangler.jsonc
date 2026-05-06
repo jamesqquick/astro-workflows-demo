@@ -1,9 +1,13 @@
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
-	"name": "workflows-explorer",
+	"name": "jqq-workflows-demo",
 	"main": "./src/worker.ts",
+	"account_id": "e9bc21da719562a3e45d77de7dd042de",
 	"compatibility_date": "2026-05-05",
-	"compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+	"compatibility_flags": [
+		"nodejs_compat",
+		"global_fetch_strictly_public"
+	],
 	"assets": {
 		"directory": "./dist",
 		"binding": "ASSETS"
@@ -16,6 +20,12 @@
 			"name": "demo-workflow",
 			"binding": "MY_WORKFLOW",
 			"class_name": "DemoWorkflow"
+		}
+	],
+	"kv_namespaces": [
+		{
+			"binding": "JQQ_WORKFLOWS_DEMO_KV",
+			"id": "0d25c57e6a5441eebb9c6257a3139184"
 		}
 	]
 }

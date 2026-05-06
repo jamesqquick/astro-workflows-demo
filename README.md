@@ -40,9 +40,12 @@ pnpm preview             # build + run wrangler dev with remote bindings
 pnpm deploy              # build + wrangler deploy
 ```
 
-> Workflows aren't reliably emulated in `astro dev`. Use `pnpm preview` (which
-> runs `wrangler dev --x-remote-bindings`) so the workflow binding talks to the
-> real Cloudflare Workflows engine.
+> Workflows aren't supported in `astro dev`, and they explicitly cannot be used
+> as remote bindings or with `wrangler dev --remote`. Use `pnpm preview`, which
+> builds Astro then runs `wrangler dev` (local). Press `e` in the terminal (or
+> open `http://localhost:8787/cdn-cgi/explorer`) to open the Workflows
+> [Local Explorer](https://developers.cloudflare.com/workflows/build/local-development/)
+> for inspecting instance state.
 
 ## How the demo flows
 
