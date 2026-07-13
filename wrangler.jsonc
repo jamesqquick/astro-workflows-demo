@@ -3,7 +3,7 @@
 	"name": "jqq-workflows-demo",
 	"main": "./src/worker.ts",
 	"account_id": "e9bc21da719562a3e45d77de7dd042de",
-	"compatibility_date": "2026-05-05",
+	"compatibility_date": "2026-06-05",
 	"compatibility_flags": [
 		"nodejs_compat",
 		"global_fetch_strictly_public"

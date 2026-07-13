@@ -10,7 +10,8 @@ export type StepKey =
 	| "sleep-step"
 	| "unreliable-step"
 	| "wait-for-custom-event"
-	| "finalize";
+	| "finalize"
+	| "trigger-failure";
 
 /**
  * Names of the tutorial-gate `step.waitForEvent` calls. The UI uses
@@ -22,11 +23,12 @@ export type ProceedGate =
 	| "sleep-step"
 	| "unreliable-step"
 	| "wait-for-custom-event"
-	| "finalize";
+	| "finalize"
+	| "trigger-failure";
 
 export type StepEntry = {
 	key: StepKey;
-	state: "active" | "completed" | "failed" | "retrying";
+	state: "active" | "completed" | "failed" | "retrying" | "rolling-back";
 	attempt?: number;
 	maxAttempts?: number;
 	error?: string;

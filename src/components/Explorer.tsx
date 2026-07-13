@@ -16,6 +16,7 @@ const STATE_BG: Record<ResolvedStepState, string> = {
 	retrying: "bg-[#FF6600] text-black",
 	completed: "bg-[#00FF66] text-black",
 	failed: "bg-[#FF0000] text-white",
+	"rolling-back": "bg-[#9D00FF] text-white",
 };
 
 const APPROVAL_DELAY_MS = 1000;
@@ -27,6 +28,8 @@ export default function Explorer() {
 	const [approvalReady, setApprovalReady] = useState(false);
 	const [sendEventDismissed, setSendEventDismissed] = useState(false);
 	const [sendEventReady, setSendEventReady] = useState(false);
+	const [rollbackDismissed, setRollbackDismissed] = useState(false);
+	const [rollbackReady, setRollbackReady] = useState(false);
 
 	// Reset dismissal whenever the relevant gate changes — so a future Restart
 	// shows the modal again.
@@ -41,6 +44,10 @@ export default function Explorer() {
 	useEffect(() => {
 		if (!w.isWaitingForCustomEvent) setSendEventDismissed(false);
 	}, [w.isWaitingForCustomEvent]);
+
+	useEffect(() => {
+		if (!w.isWaitingForRollbackDecision) setRollbackDismissed(false);
+	}, [w.isWaitingForRollbackDecision]);
 
 	// Delay the YES/NO approval modal slightly after the tutorial gate clears,
 	// so the user sees the yellow WAITING badge on the step before the dialog
@@ -66,6 +73,18 @@ export default function Explorer() {
 		return () => window.clearTimeout(t);
 	}, [w.isWaitingForCustomEvent]);
 
+	useEffect(() => {
+		if (!w.isWaitingForRollbackDecision) {
+			setRollbackReady(false);
+			return;
+		}
+		const t = window.setTimeout(
+			() => setRollbackReady(true),
+			APPROVAL_DELAY_MS,
+		);
+		return () => window.clearTimeout(t);
+	}, [w.isWaitingForRollbackDecision]);
+
 	// The tutorial modal for "wait-for-approval" rolls directly into the
 	// YES/NO approval modal, so we don't show two consecutive modals there —
 	// the approval gate handles its own messaging.
@@ -75,6 +94,8 @@ export default function Explorer() {
 		w.isWaitingForApproval && approvalReady && !approvalDismissed;
 	const showSendEvent =
 		w.isWaitingForCustomEvent && sendEventReady && !sendEventDismissed;
+	const showRollback =
+		w.isWaitingForRollbackDecision && rollbackReady && !rollbackDismissed;
 
 	return (
 		<div className="min-h-screen bg-[#F0DC5B] font-mono text-black">
@@ -130,6 +151,25 @@ export default function Explorer() {
 						</p>
 						<p className="mt-1 font-mono text-xs">
 							{w.status.error.name}: {w.status.error.message}
+						</p>
+					</div>
+				)}
+
+				{w.rollback && (
+					<div
+						className={`mb-6 border-4 border-black p-4 ${
+							w.rollback.outcome === "complete"
+								? "bg-[#9D00FF] text-white"
+								: "bg-[#FF0000] text-white"
+						}`}
+					>
+						<p className="text-[10px] font-black uppercase">
+							↩ Saga rollback {w.rollback.outcome}
+						</p>
+						<p className="mt-1 font-mono text-xs">
+							{w.rollback.outcome === "complete"
+								? "All compensating steps ran in reverse step-start order."
+								: `Rollback failed: ${w.rollback.error?.message ?? "unknown error"}`}
 						</p>
 					</div>
 				)}
@@ -257,6 +297,16 @@ export default function Explorer() {
 				/>
 			)}
 
+			{/* Rollback-decision modal — appears while trigger-failure is paused */}
+			{showRollback && (
+				<RollbackDecisionModal
+					busy={w.busy}
+					onTriggerFailure={w.triggerFailure}
+					onCompleteNormally={w.completeNormally}
+					onDismiss={() => setRollbackDismissed(true)}
+				/>
+			)}
+
 			{/* Reopen affordances when the user dismissed a modal but the gate
 			    is still active. */}
 			{w.currentProceedGate && tutorialDismissed && (
@@ -284,6 +334,15 @@ export default function Explorer() {
 					className="fixed bottom-6 right-6 z-40 cursor-pointer border-4 border-black bg-[#F0DC5B] px-5 py-3 text-sm font-black uppercase tracking-widest text-black shadow-[8px_8px_0_0_#000] hover:bg-black hover:text-[#F0DC5B]"
 				>
 					⚠ Event pending — reopen
+				</button>
+			)}
+			{w.isWaitingForRollbackDecision && rollbackDismissed && (
+				<button
+					type="button"
+					onClick={() => setRollbackDismissed(false)}
+					className="fixed bottom-6 right-6 z-40 cursor-pointer border-4 border-black bg-[#9D00FF] px-5 py-3 text-sm font-black uppercase tracking-widest text-white shadow-[8px_8px_0_0_#000] hover:bg-black hover:text-[#9D00FF]"
+				>
+					⚠ Rollback choice pending — reopen
 				</button>
 			)}
 		</div>
@@ -673,6 +732,124 @@ function SendEventModal(props: {
 				</button>
 				<p className="mt-3 font-mono text-[11px] uppercase tracking-wider text-black/60">
 					Keyboard: [ENTER] send · [ESC] dismiss
+				</p>
+			</div>
+		</ModalFrame>
+	);
+}
+
+// ---------- Rollback Decision Modal -----------------------------------------
+
+function RollbackDecisionModal(props: {
+	busy: boolean;
+	onTriggerFailure: () => Promise<void>;
+	onCompleteNormally: () => Promise<void>;
+	onDismiss: () => void;
+}) {
+	const failRef = useRef<HTMLButtonElement>(null);
+	const [submitting, setSubmitting] = useState(false);
+	const [errorMsg, setErrorMsg] = useState<string | null>(null);
+	const submittingRef = useRef(false);
+	const handleRef = useRef<(choice: "fail" | "complete") => Promise<void>>(
+		async () => {},
+	);
+
+	const handle = async (choice: "fail" | "complete") => {
+		if (submittingRef.current) return;
+		submittingRef.current = true;
+		setSubmitting(true);
+		setErrorMsg(null);
+		try {
+			if (choice === "fail") await props.onTriggerFailure();
+			else await props.onCompleteNormally();
+		} catch (err) {
+			setErrorMsg((err as Error).message);
+		} finally {
+			submittingRef.current = false;
+			setSubmitting(false);
+		}
+	};
+
+	handleRef.current = handle;
+
+	useEffect(() => {
+		failRef.current?.focus();
+	}, []);
+
+	useEffect(() => {
+		const onKey = (e: KeyboardEvent) => {
+			if (e.key === "f" || e.key === "F") {
+				e.preventDefault();
+				void handleRef.current("fail");
+			}
+			if (e.key === "c" || e.key === "C") {
+				e.preventDefault();
+				void handleRef.current("complete");
+			}
+		};
+		window.addEventListener("keydown", onKey);
+		return () => window.removeEventListener("keydown", onKey);
+	}, []);
+
+	const disabled = props.busy || submitting;
+	const stepIndex = STEPS.findIndex((s) => s.key === "trigger-failure") + 1;
+
+	return (
+		<ModalFrame
+			stepIndex={stepIndex}
+			totalSteps={STEPS.length}
+			headerLabel="ROLLBACK"
+			onDismiss={props.onDismiss}
+		>
+			<div className="p-8">
+				<span className="inline-block border-2 border-black bg-[#9D00FF] px-2 py-0.5 font-mono text-[11px] font-black uppercase tracking-wider text-white">
+					step.do · rollback
+				</span>
+				<h2 className="mt-4 text-4xl font-black uppercase leading-none tracking-tighter md:text-5xl">
+					Trigger
+					<br />
+					a saga
+					<br />
+					rollback?
+				</h2>
+				<p className="mt-6 max-w-md border-l-4 border-black pl-3 text-sm">
+					Fail the instance and Workflows runs every step's rollback handler
+					in reverse order: finalize → unreliable → process-approval →
+					initialize. Or complete normally and keep the result.
+				</p>
+
+				{errorMsg && (
+					<p className="mt-4 border-2 border-black bg-[#FF0000] px-3 py-2 font-mono text-xs text-white">
+						! {errorMsg}
+					</p>
+				)}
+				{submitting && !errorMsg && (
+					<p className="mt-4 border-2 border-black bg-[#F0DC5B] px-3 py-2 font-mono text-xs">
+						Sending...
+					</p>
+				)}
+
+				<div className="mt-8 grid grid-cols-2 gap-0 border-4 border-black">
+					<button
+						ref={failRef}
+						type="button"
+						onClick={() => handle("fail")}
+						disabled={disabled}
+						className="cursor-pointer border-r-4 border-black bg-[#9D00FF] px-6 py-5 text-xl font-black uppercase text-white hover:bg-black hover:text-[#9D00FF] disabled:cursor-not-allowed disabled:opacity-50"
+					>
+						TRIGGER FAILURE ↩
+					</button>
+					<button
+						type="button"
+						onClick={() => handle("complete")}
+						disabled={disabled}
+						className="cursor-pointer bg-[#00FF66] px-6 py-5 text-xl font-black uppercase text-black hover:bg-black hover:text-[#00FF66] disabled:cursor-not-allowed disabled:opacity-50"
+					>
+						COMPLETE →
+					</button>
+				</div>
+				<p className="mt-4 font-mono text-[11px] uppercase tracking-wider text-black/60">
+					Keyboard: [F] trigger failure · [C] complete · [ESC] close
 				</p>
 			</div>
 		</ModalFrame>

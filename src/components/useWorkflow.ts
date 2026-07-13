@@ -25,6 +25,11 @@ export const STEPS = [
 		description: "step.waitForEvent",
 	},
 	{ key: "finalize", label: "Finalize", description: "step.do" },
+	{
+		key: "trigger-failure",
+		label: "Trigger failure",
+		description: "step.do (saga rollback)",
+	},
 ] as const;
 
 export type StepKey = (typeof STEPS)[number]["key"];
@@ -42,7 +47,7 @@ export type WorkflowStatusValue =
 
 export type StepEntry = {
 	key: StepKey;
-	state: "active" | "completed" | "failed" | "retrying";
+	state: "active" | "completed" | "failed" | "retrying" | "rolling-back";
 	attempt?: number;
 	maxAttempts?: number;
 	error?: string;
@@ -55,7 +60,8 @@ export type ProceedGate =
 	| "sleep-step"
 	| "unreliable-step"
 	| "wait-for-custom-event"
-	| "finalize";
+	| "finalize"
+	| "trigger-failure";
 
 export type ProgressDoc = {
 	currentStep: StepKey | null;
@@ -64,12 +70,20 @@ export type ProgressDoc = {
 	updatedAt: string;
 };
 
+/** Mirrors the `rollback` field added to InstanceStatus by the Workflows
+ *  saga-rollback feature. Null until the instance enters rollback. */
+export type RollbackStatus = {
+	outcome: "complete" | "failed";
+	error: { name: string; message: string } | null;
+} | null;
+
 export type StatusResponse = {
 	instanceId: string;
 	status: WorkflowStatusValue;
 	error?: { name: string; message: string };
 	output?: unknown;
 	progress?: ProgressDoc | null;
+	rollback?: RollbackStatus;
 };
 
 export type LogEntry = {
@@ -86,7 +100,8 @@ export type ResolvedStepState =
 	| "sleeping"
 	| "retrying"
 	| "completed"
-	| "failed";
+	| "failed"
+	| "rolling-back";
 
 export type ResolvedStep = {
 	state: ResolvedStepState;
@@ -149,7 +164,8 @@ export function resolveStepState(
 				if (stepKey === "sleep-step") state = "sleeping";
 				else if (
 					stepKey === "wait-for-approval" ||
-					stepKey === "wait-for-custom-event"
+					stepKey === "wait-for-custom-event" ||
+					stepKey === "trigger-failure"
 				) {
 					state = "waiting";
 				} else state = "active";
@@ -185,6 +201,7 @@ export function useWorkflow(storageKey: string) {
 	const [busy, setBusy] = useState(false);
 	const previousStatusRef = useRef<WorkflowStatusValue | null>(null);
 	const seenEntriesRef = useRef<Set<string>>(new Set());
+	const rollbackOutcomeLoggedRef = useRef(false);
 
 	const appendLog = useCallback(
 		(message: string, tone: LogEntry["tone"] = "info") => {
@@ -215,6 +232,7 @@ export function useWorkflow(storageKey: string) {
 		let cancelled = false;
 		previousStatusRef.current = null;
 		seenEntriesRef.current = new Set();
+		rollbackOutcomeLoggedRef.current = false;
 
 		// ----- Per-entry log emitter (called for every progress update) ------
 		const emitNewLogEntries = (progress: ProgressDoc) => {
@@ -252,6 +270,12 @@ export function useWorkflow(storageKey: string) {
 							"error",
 						);
 						break;
+					case "rolling-back":
+						appendLog(
+							`↩ rolling back ${stepLabel} — running compensating logic`,
+							"warning",
+						);
+						break;
 				}
 			}
 		};
@@ -284,6 +308,7 @@ export function useWorkflow(storageKey: string) {
 							status: prev?.status ?? "unknown",
 							error: prev?.error,
 							output: prev?.output,
+							rollback: prev?.rollback,
 							progress: msg.progress,
 						}));
 						emitNewLogEntries(msg.progress);
@@ -340,6 +365,24 @@ export function useWorkflow(storageKey: string) {
 					// which is more current than what the API sees.
 					progress: prev?.progress ?? next.progress,
 				}));
+
+				// Surface the saga-rollback outcome once it appears in the
+				// instance status. This is the new `rollback` field exposed by
+				// the Workflows rollback feature.
+				if (next.rollback && !rollbackOutcomeLoggedRef.current) {
+					rollbackOutcomeLoggedRef.current = true;
+					if (next.rollback.outcome === "complete") {
+						appendLog(
+							"↩ Rollback complete — all compensating steps ran",
+							"success",
+						);
+					} else {
+						appendLog(
+							`✗ Rollback failed — ${next.rollback.error?.message ?? "unknown error"}`,
+							"error",
+						);
+					}
+				}
 
 				const prevStatus = previousStatusRef.current;
 				if (prevStatus !== next.status) {
@@ -418,7 +461,11 @@ export function useWorkflow(storageKey: string) {
 	};
 
 	const sendWorkflowEvent = async (
-		type: "user-decision" | "user-proceed" | "user-custom-event",
+		type:
+			| "user-decision"
+			| "user-proceed"
+			| "user-custom-event"
+			| "user-rollback-decision",
 		payload: Record<string, unknown>,
 		successLog: string,
 	) => {
@@ -471,6 +518,20 @@ export function useWorkflow(storageKey: string) {
 			"Custom event sent",
 		);
 
+	const triggerFailure = () =>
+		sendWorkflowEvent(
+			"user-rollback-decision",
+			{ choice: "fail" },
+			"Triggering failure — saga rollbacks will run",
+		);
+
+	const completeNormally = () =>
+		sendWorkflowEvent(
+			"user-rollback-decision",
+			{ choice: "complete" },
+			"Completing normally — no rollback",
+		);
+
 	const isTerminal =
 		status?.status === "complete" ||
 		status?.status === "errored" ||
@@ -491,6 +552,13 @@ export function useWorkflow(storageKey: string) {
 			(s) => s.key === "wait-for-custom-event" && s.state === "active",
 		) ?? false;
 
+	const isWaitingForRollbackDecision =
+		status?.progress?.steps?.some(
+			(s) => s.key === "trigger-failure" && s.state === "active",
+		) ?? false;
+
+	const rollback = status?.rollback ?? null;
+
 	// Tutorial gate: which `proceed:*` step.waitForEvent is the workflow
 	// currently paused on (if any).
 	const currentProceedGate = (status?.progress?.currentProceedGate ?? null) as
@@ -505,6 +573,8 @@ export function useWorkflow(storageKey: string) {
 		isTerminal,
 		isWaitingForApproval,
 		isWaitingForCustomEvent,
+		isWaitingForRollbackDecision,
+		rollback,
 		currentStep,
 		currentProceedGate,
 		startWorkflow,
@@ -512,5 +582,7 @@ export function useWorkflow(storageKey: string) {
 		reject,
 		proceed,
 		sendCustomEvent,
+		triggerFailure,
+		completeNormally,
 	};
 }

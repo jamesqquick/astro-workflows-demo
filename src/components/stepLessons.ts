@@ -125,4 +125,32 @@ return summary;`,
 		docLabel:
 			"developers.cloudflare.com/workflows/build/workers-api",
 	},
+
+	"trigger-failure": {
+		primitive: "step.do · rollback",
+		primitiveColor: "bg-[#FF0000] text-white",
+		headline: "Saga-style rollbacks",
+		body: "Attach a rollback handler to any step.do. If the instance fails downstream, Workflows runs every rollback in reverse step-start order — undoing each step's work right next to where it was done, instead of one giant top-level catch. Below, you'll choose whether to TRIGGER A FAILURE (watch all four completed steps roll back in reverse) or COMPLETE NORMALLY.",
+		snippet: `await step.do(
+  "initialize",
+  async () => {
+    const resource = await provision();
+    return { resourceId: resource.id };
+  },
+  {
+    rollback: async ({ output, error }) => {
+      // runs in reverse order if the instance fails later
+      await deprovision(output.resourceId);
+    },
+    rollbackConfig: {
+      retries: { limit: 3, delay: "15 seconds", backoff: "linear" },
+      timeout: "2 minutes",
+    },
+  },
+);`,
+		docUrl:
+			"https://developers.cloudflare.com/workflows/build/workers-api/#rollback-options",
+		docLabel:
+			"developers.cloudflare.com/workflows/build/workers-api/#rollback-options",
+	},
 };

@@ -3,6 +3,7 @@ import {
 	type WorkflowEvent,
 	type WorkflowStep,
 } from "cloudflare:workers";
+import { NonRetryableError } from "cloudflare:workflows";
 import type { ProceedGate, StepKey } from "./progress";
 
 export type DemoWorkflowParams = {
@@ -12,6 +13,7 @@ export type DemoWorkflowParams = {
 type DecisionEvent = { decision: "approve" | "reject" };
 type ProceedEvent = { for: ProceedGate };
 type CustomEvent = { sentAt: string };
+type RollbackDecisionEvent = { choice: "fail" | "complete" };
 
 const UNRELIABLE_MAX_ATTEMPTS = 3;
 const PROCEED_TIMEOUT = "1 hour";
@@ -54,6 +56,39 @@ export class DemoWorkflow extends WorkflowEntrypoint<Env, DemoWorkflowParams> {
 				await room.recordRetrying(key, attempt, error);
 			});
 
+		/**
+		 * Rollback handler used by every `step.do` that registers compensating
+		 * logic. Rollbacks run in reverse step-start order when the instance
+		 * fails downstream. We keep the compensating action deliberately simple:
+		 * a console.log so you can watch the cascade in `wrangler dev`, plus an
+		 * RPC to the ProgressRoom DO so the UI flips each step to "rolling-back"
+		 * in real time. `room` is captured from the enclosing run() scope and is
+		 * valid because Workflows re-runs run() deterministically up to the
+		 * failure point before executing registered rollbacks.
+		 */
+		const rollbackStep =
+			(key: StepKey) =>
+			async ({
+				error,
+				output,
+				ctx,
+				stepName,
+			}: {
+				error: Error;
+				output: unknown;
+				ctx?: { step: { name: string; count: number }; attempt: number };
+				stepName?: string;
+			}) => {
+				// Newer Workflows passes the step context as `ctx` (use
+				// ctx.step.name); older runtimes passed a flat `stepName`.
+				const name = ctx?.step.name ?? stepName ?? String(key);
+				console.log(
+					`[rollback] ↩ undoing "${name}" — cause: ${error.message} — output:`,
+					output,
+				);
+				await room.recordRollback(key);
+			};
+
 		const setGate = (gate: ProceedGate | null) =>
 			step.do(`progress:gate:${gate ?? "clear"}`, async () => {
 				await room.setGate(gate);
@@ -71,12 +106,16 @@ export class DemoWorkflow extends WorkflowEntrypoint<Env, DemoWorkflowParams> {
 		// ---- Tutorial gate → Step 1: initialize -------------------------------
 		await awaitProceed("initialize");
 		await recordActive("initialize");
-		const init = await step.do("initialize", async () => {
-			return {
-				message: "Workflow started",
-				startedAt: event.payload.startedAt ?? new Date().toISOString(),
-			};
-		});
+		const init = await step.do(
+			"initialize",
+			async () => {
+				return {
+					message: "Workflow started",
+					startedAt: event.payload.startedAt ?? new Date().toISOString(),
+				};
+			},
+			{ rollback: rollbackStep("initialize") },
+		);
 		await recordComplete("initialize");
 
 		await step.sleep("post-init-pause", "1 second");
@@ -104,6 +143,7 @@ export class DemoWorkflow extends WorkflowEntrypoint<Env, DemoWorkflowParams> {
 					at: new Date().toISOString(),
 				};
 			},
+			{ rollback: rollbackStep("process-approval") },
 		);
 		await recordComplete("process-approval");
 
@@ -141,6 +181,7 @@ export class DemoWorkflow extends WorkflowEntrypoint<Env, DemoWorkflowParams> {
 				}
 				return { succeededOnAttempt: ctx.attempt };
 			},
+			{ rollback: rollbackStep("unreliable-step") },
 		);
 		for (let a = 1; a < recovered.succeededOnAttempt; a++) {
 			await recordRetrying(
@@ -169,16 +210,46 @@ export class DemoWorkflow extends WorkflowEntrypoint<Env, DemoWorkflowParams> {
 		// ---- Tutorial gate → Step 7: finalize ---------------------------------
 		await awaitProceed("finalize");
 		await recordActive("finalize");
-		const summary = await step.do("finalize", async () => {
-			return {
-				init,
-				humanDecision: approvalResult.decision,
-				retryRecovered: recovered.succeededOnAttempt,
-				customEventReceivedAt: customEvent.payload.sentAt,
-				finishedAt: new Date().toISOString(),
-			};
-		});
+		const summary = await step.do(
+			"finalize",
+			async () => {
+				return {
+					init,
+					humanDecision: approvalResult.decision,
+					retryRecovered: recovered.succeededOnAttempt,
+					customEventReceivedAt: customEvent.payload.sentAt,
+					finishedAt: new Date().toISOString(),
+				};
+			},
+			{ rollback: rollbackStep("finalize") },
+		);
 		await recordComplete("finalize");
+
+		await step.sleep("post-finalize-pause", "1 second");
+
+		// ---- Tutorial gate → Step 8: trigger-failure (saga rollbacks) --------
+		// The user picks whether to fail the instance. Choosing "fail" throws a
+		// NonRetryableError, which makes Workflows execute every registered
+		// rollback handler in reverse step-start order:
+		//   finalize → unreliable-step → process-approval → initialize
+		// Choosing "complete" returns the summary and the instance ends cleanly.
+		await awaitProceed("trigger-failure");
+		await recordActive("trigger-failure");
+		const rollbackDecision = await step.waitForEvent<RollbackDecisionEvent>(
+			"trigger-failure",
+			{ type: "user-rollback-decision", timeout: "5 minutes" },
+		);
+		await recordComplete("trigger-failure");
+
+		if (rollbackDecision.payload.choice === "fail") {
+			await step.do("execute-failure", async () => {
+				// No rollback handler on this step — it is the one that fails and
+				// kicks off the saga rollback cascade for the steps before it.
+				throw new NonRetryableError(
+					"Deliberate failure — triggering saga rollbacks",
+				);
+			});
+		}
 
 		return summary;
 	}

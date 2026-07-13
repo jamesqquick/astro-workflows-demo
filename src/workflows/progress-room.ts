@@ -121,6 +121,22 @@ export class ProgressRoom extends DurableObject<Env> {
 		await this.writeAndBroadcast(next);
 	}
 
+	/**
+	 * Mark a previously-completed step as rolling back. Called from a step's
+	 * rollback handler while Workflows unwinds the saga in reverse order. Each
+	 * call appends a "rolling-back" entry, which becomes the latest entry for
+	 * that step so the UI flips it to the rollback state in real time.
+	 */
+	async recordRollback(key: StepKey): Promise<void> {
+		const prev = await this.read();
+		const next = appendStep(prev, {
+			key,
+			state: "rolling-back",
+			at: new Date().toISOString(),
+		});
+		await this.writeAndBroadcast(next);
+	}
+
 	async setGate(gate: ProceedGate | null): Promise<void> {
 		const prev = await this.read();
 		const next = setProceedGate(prev, gate);
