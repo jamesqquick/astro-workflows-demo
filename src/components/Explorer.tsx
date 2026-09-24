@@ -101,12 +101,20 @@ export default function Explorer() {
 		<div className="min-h-screen bg-[#F0DC5B] font-mono text-black">
 			<main className="mx-auto max-w-6xl px-6 py-8">
 				{/* Header banner */}
-				<header className="mb-6 border-4 border-black bg-white p-6">
+				<header className="mb-6 flex flex-wrap items-start justify-between gap-6 border-4 border-black bg-white p-6">
 					<h1 className="text-5xl font-black uppercase leading-none tracking-tighter md:text-6xl">
 						Workflows
 						<br />
 						Explorer.
 					</h1>
+					<a
+						href="https://github.com/jamesqquick/astro-workflows-demo"
+						target="_blank"
+						rel="noreferrer"
+						className="border-4 border-black bg-[#F0DC5B] px-4 py-3 text-xs font-black uppercase text-black hover:bg-black hover:text-[#F0DC5B]"
+					>
+						View source on GitHub →
+					</a>
 				</header>
 
 				{/* Controls */}
@@ -143,6 +151,25 @@ export default function Explorer() {
 						</p>
 					</div>
 				</div>
+
+				<section className="mb-6 border-4 border-black bg-black p-4 text-[#F0DC5B]">
+					<div className="flex flex-wrap items-center justify-between gap-3">
+						<div>
+							<p className="text-[10px] font-black uppercase tracking-widest">
+								Live progress path
+							</p>
+							<p className="mt-2 font-mono text-xs leading-relaxed">
+								Browser → Worker → Workflow → ProgressRoom Durable Object → WebSocket → Browser
+							</p>
+						</div>
+						<p className="border-2 border-[#F0DC5B] px-2 py-1 text-[10px] font-black uppercase">
+							{w.connectionState}
+						</p>
+					</div>
+					<p className="mt-3 max-w-3xl font-mono text-[11px] leading-relaxed text-white/80">
+						The Workflow and Durable Object share the instance ID. The Durable Object persists the latest progress before broadcasting it, so reconnecting clients can catch up without polling for step progress.
+					</p>
+				</section>
 
 				{w.status?.error && (
 					<div className="mb-6 border-4 border-black bg-[#FF0000] p-4 text-white">

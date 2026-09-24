@@ -121,6 +121,17 @@ export class ProgressRoom extends DurableObject<Env> {
 		await this.writeAndBroadcast(next);
 	}
 
+	async recordFailed(key: StepKey, error: string): Promise<void> {
+		const prev = await this.read();
+		const next = appendStep(prev, {
+			key,
+			state: "failed",
+			error,
+			at: new Date().toISOString(),
+		});
+		await this.writeAndBroadcast(next);
+	}
+
 	/**
 	 * Mark a previously-completed step as rolling back. Called from a step's
 	 * rollback handler while Workflows unwinds the saga in reverse order. Each

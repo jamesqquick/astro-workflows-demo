@@ -51,11 +51,6 @@ export class DemoWorkflow extends WorkflowEntrypoint<Env, DemoWorkflowParams> {
 				},
 			);
 
-		const recordRetrying = (key: StepKey, attempt: number, error: string) =>
-			step.do(`progress:${key}:retry:${attempt}`, async () => {
-				await room.recordRetrying(key, attempt, error);
-			});
-
 		/**
 		 * Rollback handler used by every `step.do` that registers compensating
 		 * logic. Rollbacks run in reverse step-start order when the instance
@@ -131,20 +126,29 @@ export class DemoWorkflow extends WorkflowEntrypoint<Env, DemoWorkflowParams> {
 
 		// ---- Step 3: process-approval (no gate — runs right after decision) ---
 		await recordActive("process-approval");
-		const approvalResult = await step.do(
-			"process-approval",
-			{ retries: { limit: 1, delay: "1 second", backoff: "constant" } },
-			async () => {
-				if (decisionEvent.payload.decision === "reject") {
-					throw new Error("Rejected by human");
-				}
-				return {
-					decision: "approve" as const,
-					at: new Date().toISOString(),
-				};
-			},
-			{ rollback: rollbackStep("process-approval") },
-		);
+		let approvalResult: { decision: "approve"; at: string };
+		try {
+			approvalResult = await step.do(
+				"process-approval",
+				{ retries: { limit: 1, delay: "1 second", backoff: "constant" } },
+				async () => {
+					if (decisionEvent.payload.decision === "reject") {
+						throw new Error("Rejected by human");
+					}
+					return {
+						decision: "approve" as const,
+						at: new Date().toISOString(),
+					};
+				},
+				{ rollback: rollbackStep("process-approval") },
+			);
+		} catch (error) {
+			await room.recordFailed(
+				"process-approval",
+				error instanceof Error ? error.message : "Approval processing failed",
+			);
+			throw error;
+		}
 		await recordComplete("process-approval");
 
 		await step.sleep("post-approval-pause", "1 second");
@@ -157,38 +161,44 @@ export class DemoWorkflow extends WorkflowEntrypoint<Env, DemoWorkflowParams> {
 
 		// ---- Tutorial gate → Step 5: unreliable-step --------------------------
 		await awaitProceed("unreliable-step");
-		await recordActive("unreliable-step", 1);
-		const recovered = await step.do(
-			"unreliable-step",
-			{
-				retries: {
-					limit: UNRELIABLE_MAX_ATTEMPTS,
-					delay: "2 seconds",
-					backoff: "linear",
-				},
-			},
-			async (ctx) => {
-				if (ctx.attempt < UNRELIABLE_MAX_ATTEMPTS) {
-					// Demo-only: deliberate throw to showcase step-level retries.
-					// wrangler dev will log this as an "Uncaught Error" — that's
-					// expected; Workflows catches it and reruns the step.
-					console.log(
-						`[demo] planned failure on attempt ${ctx.attempt} — workflow will retry`,
-					);
-					throw new Error(
-						`(planned demo failure — attempt ${ctx.attempt} of ${UNRELIABLE_MAX_ATTEMPTS})`,
-					);
-				}
-				return { succeededOnAttempt: ctx.attempt };
-			},
-			{ rollback: rollbackStep("unreliable-step") },
-		);
-		for (let a = 1; a < recovered.succeededOnAttempt; a++) {
-			await recordRetrying(
+		let recovered: { succeededOnAttempt: number };
+		try {
+			recovered = await step.do(
 				"unreliable-step",
-				a,
-				`Planned demo failure on attempt ${a}`,
+				{
+					retries: {
+						limit: UNRELIABLE_MAX_ATTEMPTS,
+						delay: "2 seconds",
+						backoff: "linear",
+					},
+				},
+				async (ctx) => {
+					await room.recordActive("unreliable-step", ctx.attempt);
+					if (ctx.attempt < UNRELIABLE_MAX_ATTEMPTS) {
+						const message =
+							`Planned demo failure on attempt ${ctx.attempt}`;
+						await room.recordRetrying(
+							"unreliable-step",
+							ctx.attempt,
+							message,
+						);
+						console.log(
+							`[demo] planned failure on attempt ${ctx.attempt} — workflow will retry`,
+						);
+						throw new Error(
+							`(planned demo failure — attempt ${ctx.attempt} of ${UNRELIABLE_MAX_ATTEMPTS})`,
+						);
+					}
+					return { succeededOnAttempt: ctx.attempt };
+				},
+				{ rollback: rollbackStep("unreliable-step") },
 			);
+		} catch (error) {
+			await room.recordFailed(
+				"unreliable-step",
+				error instanceof Error ? error.message : "Retry step failed",
+			);
+			throw error;
 		}
 		await recordComplete("unreliable-step", recovered.succeededOnAttempt);
 
@@ -243,6 +253,10 @@ export class DemoWorkflow extends WorkflowEntrypoint<Env, DemoWorkflowParams> {
 
 		if (rollbackDecision.payload.choice === "fail") {
 			await step.do("execute-failure", async () => {
+				await room.recordFailed(
+					"trigger-failure",
+					"Deliberate failure — triggering saga rollbacks",
+				);
 				// No rollback handler on this step — it is the one that fails and
 				// kicks off the saga rollback cascade for the steps before it.
 				throw new NonRetryableError(
