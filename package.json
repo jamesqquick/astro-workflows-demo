@@ -10,6 +10,7 @@
     "build": "astro build && node scripts/dedupe-wrangler-bindings.mjs",
     "preview": "pnpm build && wrangler dev",
     "deploy": "pnpm build && wrangler deploy",
+    "check": "astro check",
     "astro": "astro",
     "cf-typegen": "wrangler types"
   },
@@ -23,9 +24,13 @@
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
     "tailwindcss": "^4.2.4",
-    "wrangler": "^4.100.0"
+    "wrangler": "^4.137.0"
   },
   "overrides": {
     "vite": "^7"
+  },
+  "devDependencies": {
+    "@astrojs/check": "^0.9.10",
+    "@types/node": "^26.6.2"
   }
 }

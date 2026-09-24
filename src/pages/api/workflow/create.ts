@@ -11,13 +11,23 @@ export const POST: APIRoute = async ({ request }) => {
 		// Empty body is fine — id is optional.
 	}
 
-	const instance = await env.MY_WORKFLOW.create({
-		id: body.id,
-		params: { startedAt: new Date().toISOString() },
-	});
+	try {
+		const instance = await env.MY_WORKFLOW.create({
+			id: body.id,
+			params: { startedAt: new Date().toISOString() },
+		});
 
-	return Response.json({
-		instanceId: instance.id,
-		status: await instance.status(),
-	});
+		return Response.json({
+			instanceId: instance.id,
+			status: await instance.status(),
+		});
+	} catch (error) {
+		return Response.json(
+			{
+				error:
+					error instanceof Error ? error.message : "Unable to create workflow",
+			},
+			{ status: 500 },
+		);
+	}
 };

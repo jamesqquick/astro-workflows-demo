@@ -114,7 +114,13 @@ export type ResolvedStep = {
  *  complete / errored). Progress updates flow through the WebSocket and are
  *  effectively instant. */
 const STATUS_POLL_INTERVAL_MS = 2000;
-const WS_RECONNECT_BACKOFF_MS = [500, 1500, 4000];
+const WS_RECONNECT_BACKOFF_MS = [500, 1500, 4000, 8000, 15000];
+
+export type LiveConnectionState =
+	| "disconnected"
+	| "connecting"
+	| "live"
+	| "reconnecting";
 
 function timeNow() {
 	return new Date().toLocaleTimeString();
@@ -199,6 +205,8 @@ export function useWorkflow(storageKey: string) {
 	const [status, setStatus] = useState<StatusResponse | null>(null);
 	const [logs, setLogs] = useState<LogEntry[]>([]);
 	const [busy, setBusy] = useState(false);
+	const [connectionState, setConnectionState] =
+		useState<LiveConnectionState>("disconnected");
 	const previousStatusRef = useRef<WorkflowStatusValue | null>(null);
 	const seenEntriesRef = useRef<Set<string>>(new Set());
 	const rollbackOutcomeLoggedRef = useRef(false);
@@ -284,9 +292,11 @@ export function useWorkflow(storageKey: string) {
 		let ws: WebSocket | null = null;
 		let reconnectAttempt = 0;
 		let reconnectTimer: number | undefined;
+		let reconnectNoticeLogged = false;
 
 		const connectWs = () => {
 			if (cancelled) return;
+			setConnectionState(reconnectAttempt === 0 ? "connecting" : "reconnecting");
 
 			const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
 			const url = `${proto}//${window.location.host}/api/workflow/ws?id=${encodeURIComponent(instanceId)}`;
@@ -294,6 +304,8 @@ export function useWorkflow(storageKey: string) {
 
 			ws.onopen = () => {
 				reconnectAttempt = 0;
+				reconnectNoticeLogged = false;
+				setConnectionState("live");
 			};
 
 			ws.onmessage = (ev) => {
@@ -321,14 +333,18 @@ export function useWorkflow(storageKey: string) {
 			ws.onclose = () => {
 				if (cancelled) return;
 				ws = null;
-				if (reconnectAttempt < WS_RECONNECT_BACKOFF_MS.length) {
-					const delay = WS_RECONNECT_BACKOFF_MS[reconnectAttempt];
-					reconnectAttempt++;
-					reconnectTimer = window.setTimeout(connectWs, delay);
-				} else {
+				setConnectionState("reconnecting");
+				const delay =
+					WS_RECONNECT_BACKOFF_MS[
+						Math.min(reconnectAttempt, WS_RECONNECT_BACKOFF_MS.length - 1)
+					];
+				reconnectAttempt++;
+				reconnectTimer = window.setTimeout(connectWs, delay);
+				if (!reconnectNoticeLogged && reconnectAttempt >= WS_RECONNECT_BACKOFF_MS.length) {
+					reconnectNoticeLogged = true;
 					appendLog(
-						"Live updates disconnected. Refresh to reconnect.",
-						"error",
+						"Live updates are reconnecting. Persisted progress remains available.",
+						"warning",
 					);
 				}
 			};
@@ -426,6 +442,7 @@ export function useWorkflow(storageKey: string) {
 					// ignore
 				}
 			}
+			setConnectionState("disconnected");
 		};
 	}, [instanceId, appendLog]);
 
@@ -570,6 +587,7 @@ export function useWorkflow(storageKey: string) {
 		status,
 		logs,
 		busy,
+		connectionState,
 		isTerminal,
 		isWaitingForApproval,
 		isWaitingForCustomEvent,
